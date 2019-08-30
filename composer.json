@@ -1,0 +1,31 @@
+{
+    "name": "robmkr/smartadmin",
+    "description": "Smart Admin is an library for Laravel REST Applications (Developed By RobMKR (C) 2017)",
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "Robert Mkrtchyan",
+            "email": "mkrtchyanrobert@gmail.com"
+        }
+    ],
+    "version": "1.0.0",
+    "type": "vcs",
+    "minimum-stability": "dev",
+    "require": {
+        "php": ">=5.6.4",
+        "laravel/framework": ">=5.3.0",
+        "tymon/jwt-auth": "0.5.*",
+        "dimsav/laravel-translatable": "^6.0",
+        "doctrine/dbal": "^2.5",
+        "felixkiss/uniquewith-validator": "2.*",
+        "owen-it/laravel-auditing": "^3.1",
+        "venturecraft/revisionable": "1.*",
+        "yadakhov/insert-on-duplicate-key": "^1.1",
+        "maatwebsite/excel" : "~2.1.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "RobMkr\\SmartAdmin\\" : "/src"
+        }
+    }
+}

@@ -1,0 +1,846 @@
+<?php
+namespace MgpLabs\SmartAdmin\Controllers;
+
+use Illuminate\Support\Facades\File;
+use Illuminate\Http\UploadedFile;
+use MgpLabs\SmartAdmin\Models\SmartAdminBaseModel;
+use MgpLabs\SmartAdmin\Modules\Exportable\Exportable;
+use MgpLabs\SmartAdmin\Services\StringService;
+use MgpLabs\SmartAdmin\Services\ApiResponseService;
+use MgpLabs\SmartAdmin\Services\JWTService;
+use Illuminate\Http\JsonResponse;
+use Illuminate\Support\Facades\App;
+use Illuminate\Support\Facades\Request as _Request; /* This Class give us path() method, which returns current uri */
+use Illuminate\Http\Request; /* Default Request Class */
+
+class Controller extends BaseController
+{
+
+    use Exportable;
+
+    /**
+     * Api Default route [need to cut, to get actual model in ACL]
+     */
+    const __URI__ = 'api/default/';
+
+    /**
+     * Get Query filters
+     *
+     * @var array
+     */
+    private $filters = [];
+
+    /**
+     * Get query filters pushed in one array
+     *
+     * @var array
+     */
+    private $filters_sorted = [];
+
+    /**
+     * Sorting array
+     *
+     * @var array
+     */
+    private $sorting = [];
+
+    /**
+     * Grouping array
+     *
+     * @var array
+     */
+    private $grouping = [];
+
+    /**
+     * With Relations
+     *
+     * @var array
+     */
+    private $withs = [];
+
+    /**
+     * Alternative Parameters
+     *
+     * @var array
+     */
+    private $params = [];
+
+    /**
+     * Selectable attributes
+     *
+     * @var array
+     */
+    private $selectable = [];
+
+    /**
+     * Default Model Table Name
+     *
+     * @var array
+     */
+    private $model_table = [];
+
+    /**
+     * Table has Translations
+     * as defined " false
+     *
+     * @var bool
+     */
+    private $translated_table = false;
+
+    /**
+     * Query has translatable filters
+     *
+     * @var bool
+     */
+    private $has_translatable_filter = false;
+
+    /**
+     * Pagination object
+     *
+     * @var
+     */
+    protected $pagination;
+
+    /**
+     * Model instance
+     *
+     * @var
+     */
+    protected $model;
+
+    /**
+     * Model Translated attributes
+     *
+     * @var
+     */
+    protected $translated_attributes = [];
+
+    /**
+     * Model Name
+     *
+     * @var mixed
+     */
+    protected $model_name;
+
+    /**
+     * User Id
+     *
+     * @var
+     */
+    protected $user = null;
+
+    /**
+     * Create Unique model instance
+     *
+     * UniqueController constructor.
+     */
+    public function __construct(){
+        App::setLocale(JWTService::getLocale());
+
+        // Middleware for checking class existence
+        $this->middleware('model_exists');
+
+        // Get Model Name
+        $this->model_name = $this->getModelName();
+
+        // Get Model Name with Namespace
+        if(array_key_exists($this->getModelName(false), config('smartadmin.vendormodels'))){
+            $_model = self::__VENDOR_MODEL_NAMESPACE__ . $this->model_name;
+        }else{
+            $_model = self::__MODEL_NAMESPACE__ . $this->model_name;
+        }
+
+        /* Checking class_existence after middleware, because Laravel first called this constructor, than only middleware */
+        if(class_exists($_model)){
+            $this->model = new $_model();
+            $this->model_table = $this->model->getTable();
+
+            if($this->model->hasTranslatedAttributes()){
+                $this->translated_table = true;
+                $this->translated_attributes = $this->model->translatedAttributes;
+            }
+        }
+    }
+
+    /**
+     * Get Model Name form request uri
+     *
+     * @param $camel_cased = true
+     * @return mixed
+     */
+    protected function getModelName($camel_cased = true){
+        $full_uri = _Request::path();
+
+        $model_name = StringService::cutFromString(static::__URI__, $full_uri);
+
+        $model_name = explode('/', $model_name)[0];
+
+        return $camel_cased ? StringService::toCamelCase($model_name) : $model_name;
+    }
+
+    /**
+     * Get filters from query
+     *
+     * @param Request $request
+     * @return self
+     */
+    private function getFilters(Request $request){
+        if(!$request->has('f') || !$request->has('fq') || !$request->has('ft')){
+            return $this;
+        }
+
+        $this->filters['fields'] = (array) $request->input('f');
+        $this->filters['queries'] = (array) $request->input('fq');
+        $this->filters['types'] = (array) $request->input('ft');
+
+        foreach($this->filters['fields'] as $_key => $_field){
+            if(!$this->filters['queries'][$_key]){
+                continue;
+            }
+
+            $this->filters_sorted[$_key]['field'] = $_field;
+            $this->filters_sorted[$_key]['query'] = $this->filters['queries'][$_key];
+            $this->filters_sorted[$_key]['type'] = $this->filters['types'][$_key];
+        }
+
+        return $this;
+    }
+
+    /**
+     * Get sort object from request
+     *
+     * @param Request $request
+     * @return $this
+     */
+    private function getSorting(Request $request){
+        if(!$request->has('sort')){
+            return $this;
+        }
+
+        $this->sorting['main'] = [];
+        $this->sorting['translatable'] = [];
+        $translated_attributes = isset($this->model->translatedAttributes) ? $this->model->translatedAttributes : [];
+        $fillable = $this->model->getFillable();
+
+        foreach(json_decode($request->input('sort'), true) as $_sort){
+            if(in_array($_sort['property'], $translated_attributes)){
+                $this->sorting['translatable'][] = $_sort;
+            }else if(in_array($_sort['property'], $fillable)){
+                $this->sorting['main'][] = $_sort;
+            }
+        }
+
+        return $this;
+    }
+
+    /**
+     * Get groupping from request
+     *
+     * @param Request $request
+     * @return $this
+     */
+    private function getGrouping(Request $request){
+        $this->grouping = (array) $request->get('group', []);
+        return $this;
+    }
+
+    /**
+     * Get needed relations from request
+     *
+     * @param Request $request
+     * @return $this
+     */
+    private function getWiths(Request $request){
+
+        if($request->has('with')){
+            foreach ($request->get('with') as $_with){
+                if($this->model->hasRelation($_with))
+                    $this->withs[] = $_with;
+            }
+        }
+
+        return $this;
+    }
+
+    /**
+     * Get Params
+     *
+     * @param Request $request
+     * @return $this
+     */
+    private function getParams(Request $request){
+        $this->params['revision'] = $request->get('revision');
+        return $this;
+    }
+
+    /**
+     * Get array of Range from given string Range
+     * Delimiter ","
+     *
+     * @param $query
+     * @return array
+     */
+    private function getRangeValues($query){
+        $exploded = explode(',', $query);
+        foreach ($exploded as $k => $item) {
+            $exploded[$k] = trim($item);
+        }
+        return $exploded;
+    }
+
+    /**
+     * Check if exists relations, then add to query
+     *
+     * @return $this
+     */
+    private function addRelationsToQuery(){
+        $relations = $this->model->getRels();
+
+        if(data_get($this->params, 'revision') !== 'all')
+            $this->model = $this->model->addRevisions($this->model->query());
+
+        if(!empty($relations)){
+            $this->model = call_user_func_array(array($this->model , 'with'), $relations);
+        }
+
+        return $this;
+    }
+
+    /**
+     * Add Filters to Query
+     *
+     * @return $this
+     */
+    private function addFiltersToQuery(){
+        if(empty($this->filters_sorted)){
+            return $this;
+        }
+
+        foreach ($this->filters_sorted as $_filter){
+            $is_translatable = $this->translated_table && array_search($_filter['field'], $this->translated_attributes) !== false;
+            if($is_translatable){
+                $this->has_translatable_filter = true;
+                $_filter['field'] = 't.' . $_filter['field'];
+            }else{
+                $_filter['field'] = $this->model_table . '.' . $_filter['field'];
+            }
+
+            switch ($_filter['type']){
+                case 'text':
+                    $this->model = $this->model->where($_filter['field'], 'LIKE', $_filter['query'] . '%');
+                    break;
+                case 'range':
+                    $this->model = $this->model->whereBetween($_filter['field'], $this->getRangeValues($_filter['query']));
+                    break;
+                case 'n-equal' :
+                    $this->model = $this->model->where($_filter['field'], '!=', $this->getRangeValues($_filter['query']));
+                    break;
+                default:
+                    $this->model = $this->model->whereIn($_filter['field'], explode('|', $_filter['query']));
+            }
+        }
+
+        return $this;
+    }
+
+    /**
+     * Add Sorting to Query
+     *
+     * @return $this
+     */
+    private function addSortingToQuery(){
+        if(empty($this->sorting)){
+            return $this;
+        }
+        foreach ($this->sorting['main'] as $_sort_field){
+            $this->model = $this->model->orderBy($_sort_field['property'], $_sort_field['direction']);
+        }
+
+        foreach ($this->sorting['translatable'] as $_sort_field){
+            $this->model = $this->model->orderBy('t.' . $_sort_field['property'], $_sort_field['direction']);
+        }
+
+        return $this;
+    }
+
+    /**
+     * Store file and return url
+     *
+     * @param UploadedFile $uploaded_file
+     * @return string
+     */
+    private function storeFile(UploadedFile $uploaded_file){
+        // Create Disk name from model name
+        $path_name = StringService::dirName($this->model_name);
+
+        // Create File Name
+        $file_name = pathinfo($uploaded_file->getClientOriginalName(), PATHINFO_FILENAME) . '_' . time() . '.' . $uploaded_file->getClientOriginalExtension();
+
+        // Store uploaded file to default disk with model path name
+        $uploaded_file->storeAs($path_name, $file_name, 'default');
+
+        return '/' . config('filesystems')['disks']['default']['url_path'] . $path_name . '/' . $file_name;
+    }
+
+    /**
+     * Attach files from data, store them and return urls
+     *
+     * @param $data
+     * @return $this
+     */
+    private function attachFiles(&$data){
+        if(empty($data['files'])){
+            return $this;
+        }
+
+        // Loop on files, store it, then return image url...
+        foreach($data['files'] as $_field => $_value){
+
+            if($_value instanceof UploadedFile){
+                $data['main'][$_field] = $this->storeFile($_value);
+            }
+
+        }
+
+        return $this;
+    }
+
+    /**
+     * Add Grouping TO Query
+     *
+     * @return $this
+     */
+    public function addGroupingToQuery(){
+        foreach($this->grouping as $_group){
+            $this->model = $this->model->groupBy($_group);
+        }
+        return $this;
+    }
+
+    /**
+     * Add Withs TO Query
+     *
+     * @return $this
+     */
+    public function addWithsToQuery(){
+        if(!empty($this->withs)){
+            $this->model = call_user_func_array([$this->model, 'with'], $this->withs);
+        }
+
+        return $this;
+    }
+
+    /**
+     * Prepare Translated query
+     *
+     * @return mixed
+     */
+    private function prepareTranslatedPagination(){
+        $t_model_table = app()->make($this->model->getTranslationModelName())->getTable();
+        $t_model_relation = $this->model->relation_column;
+        $this->selectable = array_merge([$this->model_table . '.*'], $this->model->getTranslatedAttributes('t'));
+
+        $this->addRelationsToQuery()
+            ->addFiltersToQuery()
+            ->addSortingToQuery()
+            ->addGroupingToQuery()
+            ->addWithsToQuery();
+
+        $has_translatable_filter = $this->has_translatable_filter;
+
+        $this->model = $this->model
+            ->with(['translations' => function ($with) use ($has_translatable_filter){
+                if(!$has_translatable_filter && !in_array('translations', $this->withs)) {
+                    $with->where('locale', JWTService::getLocale());
+                    $with->orWhere('locale', null);
+                }
+            }])
+            ->leftJoin($t_model_table . ' as t', 't.' . $t_model_relation, '=', $this->model_table . '.id')
+            ->where(function($query) use ($has_translatable_filter) {
+                if(!$has_translatable_filter){
+                    $query->where('t.locale', JWTService::getLocale());
+                    $query->orWhere('t.locale', null);
+                }
+            });
+
+        if($this->has_translatable_filter){
+            $this->model =  $this->model->groupBy($this->model_table . '.id');
+        }
+
+        call_user_func_array([$this->model, 'select'], $this->selectable);
+        return $this->model;
+    }
+
+    /**
+     * Prepare non translated query
+     *
+     * @return mixed
+     */
+    private function prepareDefaultPagination(){
+        $this->addRelationsToQuery()
+            ->addFiltersToQuery()
+            ->addSortingToQuery()
+            ->addGroupingToQuery()
+            ->addWithsToQuery();
+
+        return $this->model;
+    }
+
+    /**
+     * Get Pagination Object
+     *
+     * @param $limit
+     * @return \Illuminate\Http\JsonResponse
+     */
+    private function getAll($limit){
+        if($this->model->hasWiths()){
+            $this->withs = array_merge($this->withs, $this->model->getWiths());
+        }
+
+        $this->model = $this->model->hasTranslatedAttributes() ? $this->prepareTranslatedPagination() : $this->prepareDefaultPagination() ;
+
+        if(!empty($this->withs))
+            call_user_func_array([$this->model, 'with'], $this->withs);
+
+        $this->pagination = $this->model->paginate($limit)->toArray();
+
+        $data = $this->pagination['data'];
+        unset($this->pagination['data']);
+
+        return ApiResponseService::successCustom(['data' => $data, 'pagination' => $this->pagination]);
+    }
+
+    /**
+     * Get one entity
+     *
+     * @param $id
+     * @return \Illuminate\Http\JsonResponse
+     */
+    private function getOne($id){
+        if($this->translated_attributes){
+            $this->model = $this->model->with('translations');
+        }
+        $data = $this->model->find($id);
+        if(empty($data)){
+            return ApiResponseService::error('ENTITY_NOT_FOUND', 404);
+        }
+        return ApiResponseService::success($data);
+    }
+
+    /**
+     * Create entity
+     *
+     * @param $data
+     * @param $files
+     * @return mixed
+     */
+    private function create($data, $files = null){
+        // Check request has files or not
+        if($files){
+            $data = array_merge($data, $files);
+        }
+
+        // Validating Data
+        $errors = $this->model->setTranslatableRules()->validate($data);
+
+        if($errors){
+            // Return Validation errors [Validation Error Code : 422]
+            return ApiResponseService::error('VALIDATION_ERROR', 422, $errors);
+        }
+
+        // Separate data to 2 arrays: main and translatable
+        $data = $this->model->separateData($data);
+
+        // Using model->create([]) to tell our model that it must check fillable array
+        // For manual save use [model->entity = value] then [model->save()]
+        $entity = $this->attachFiles($data)->model->create($data['main']);
+
+        foreach($data['translatable'] as $_field => $_value){
+            if(! config('smartadmin.locale_is_lower'))
+                $_field = StringService::upperAfterChar(':', $_field);
+            
+            $entity->{$_field} = $_value;
+        }
+
+        foreach($data['multiselect'] as $_field => $_values){
+            $entity->{$_field}()->attach($_values['pivot'], $_values['extra']);
+        }
+
+        $entity->save();
+
+        return ApiResponseService::success($entity, 'Entity of '. $this->model_name . ' Created');
+    }
+
+//    /**
+//     *
+//     *
+//     * @param $Entity
+//     * @param $changeable
+//     * @return JsonResponse
+//     */
+//    private function editOneField($Entity, $changeable){
+//        $errors = $this->model->validate($changeable, $Entity->id, $changeable);
+//
+//        if($errors){
+//            return ApiResponseService::error('VALIDATION_ERROR', 422, $errors);
+//        }
+//
+//        if($Entity->update($changeable)){
+//            return ApiResponseService::success($Entity->toArray(),'Entity Successfully Updated');
+//        }else{
+//            return ApiResponseService::unCatchableError('DefaultController@editOneField');
+//        }
+//    }
+
+    /**
+     * Remove file by given file name
+     * Path : public
+     *
+     * @param $field_name
+     * @param SmartAdminBaseModel $Entity
+     * @return $this
+     */
+    private function removeFile($field_name, SmartAdminBaseModel &$Entity){
+        // Remove File From public / default_images / {model_name}
+        File::delete(public_path() . $Entity->{$field_name});
+
+        // Set Entity url empty
+        // Be careful
+        // Entity instance is a real object, not pointer
+        $Entity->{$field_name} = '';
+
+        return $this;
+    }
+
+    /**
+     * Remove Files
+     * Given files are array
+     *
+     * @param $remove_files
+     * @param SmartAdminBaseModel $Entity
+     * @return $this
+     */
+    private function removeFiles($remove_files, SmartAdminBaseModel &$Entity){
+        foreach ($remove_files as $_file_name => $_delete) {
+            if($_delete === 'true'){
+               $this->removeFile($_file_name, $Entity);
+            }
+        }
+
+        return $this;
+    }
+
+	/**
+     * Replace New file with old
+     * For given array of files
+     *
+     * @param SmartAdminBaseModel $Entity
+	 * @param $remove_files
+     * @return $this
+     */
+    private function addOrEditFiles(&$Entity, $files){
+
+        foreach($files as $_field_name => $_uploaded_file){
+            $Entity->{$_field_name} = $this->removeFile($_field_name, $Entity)->storeFile($_uploaded_file);
+        }
+
+        return $this;
+    }
+
+    /**
+     * Edit Multiple fields
+     *
+     * @param $Entity
+     * @param $changeable
+     * @param $files
+     * @param $remove_files
+     * @return JsonResponse
+     */
+    private function editManyFields($Entity, $changeable, $files = null, $remove_files = null){
+
+        if($files){
+            $changeable = array_merge($changeable, $files);
+        }
+
+        $errors = $this->model->setTranslatableRules($Entity->id)->validate($changeable, $Entity->id, $changeable);
+
+        $this->model->validateFilesRemove($errors, $Entity, $remove_files);
+
+        if($errors){
+            return ApiResponseService::error('VALIDATION_ERROR', 422, $errors);
+        }
+
+        if(!empty($remove_files)) {
+            $this->removeFiles($remove_files, $Entity);
+        }
+
+        $changeable = $this->model->separateData($changeable);
+
+        if($Entity->update($changeable['main'])){
+            foreach($changeable['translatable'] as $_field => $_value){
+                if(! config('smartadmin.locale_is_lower'))
+                    $_field = StringService::upperAfterChar(':', $_field);
+
+                $Entity->{$_field} = $_value;
+            }
+
+            foreach($changeable['multiselect'] as $_field => $_values){
+                $pivot_ids = [];
+
+                foreach($_values['pivot'] as $_pivot_id){
+                    $pivot_ids[$_pivot_id] = $_values['extra'];
+                }
+
+                $Entity->{$_field}()->sync($pivot_ids);
+            }
+
+            if(! empty($changeable['files'])){
+                $this->addOrEditFiles($Entity, $changeable['files']);
+            }
+
+            $Entity->save();
+
+            return ApiResponseService::success($Entity->toArray(),'Entity Successfully Updated');
+        }else{
+            return ApiResponseService::unCatchableError('DefaultController@editManyFields');
+        }
+    }
+
+    /**
+     * Edit Entity
+     *
+     * @param $id
+     * @param $data
+     * @param $files
+     * @param $remove_files
+     * @return JsonResponse
+     */
+    private function edit($id, $data, $files = null, $remove_files = null){
+
+        if(empty($data)){
+            return ApiResponseService::incorrectParams();
+        }
+
+        $Entity = $this->model->find($id);
+
+        if(!$Entity){
+            return ApiResponseService::error('ENTITY_NOT_FOUND', 404);
+        }
+
+//        return (count($data) === 1) ? $this->editOneField($Entity, $data) : $this->editManyFields($Entity, $data);
+        return $this->editManyFields($Entity, $data, $files, $remove_files);
+    }
+
+    /**
+     * Delete Entity
+     *
+     * @param $id
+     * @return \Illuminate\Http\JsonResponse
+     */
+    private function _delete($id){
+        $entity = $this->model->find($id);
+        if(!$entity){
+            return ApiResponseService::error('ENTITY_NOT_FOUND', 404);
+        }
+        $entity->delete();
+        return ApiResponseService::success(['msg' => 'Entity of '. $this->model_name . ' Deleted']);
+
+    }
+
+    /**
+     * Delete Multiple Records by given array of ids
+     *
+     * @param $ids
+     * @return JsonResponse
+     */
+    private function _deleteMany($ids){
+        $ids = explode(',', $ids);
+
+        if(empty($ids) || !is_array($ids)){
+            return ApiResponseService::incorrectParams();
+        }
+
+        foreach ($ids as $_id){
+            $entity = $this->model->find($_id);
+
+            if($entity)
+                $entity->delete();
+        }
+
+        return ApiResponseService::success(['msg' => 'Entities Deleted']);
+    }
+
+    /**
+     * Unique route [method="GET"]
+     * |Get One By Id
+     * |Get All By Page Limit
+     *
+     * @param Request $request
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function get(Request $request){
+
+X        $this->getFilters($request)
+            ->getSorting($request)
+            ->getGrouping($request)
+            ->getWiths($request)
+            ->getParams($request);
+
+        if($request->has('export') && $request->input('export') && method_exists($this, 'getExport')){
+
+            $response = $this->getExport($request->all());
+
+        }elseif($request->has('type') && $request->input('type') === 'all'){
+
+            $limit = ($request->has('limit') && $request->input('limit') > 0) ? $request->input('limit') : config('pagelimits.unique');
+
+            $response = $this->getAll($limit);
+
+        }elseif($request->has('id') && $request->input('id') !== '0'){
+
+            $response = $this->getOne($request->input('id'));
+
+        }
+
+        if(empty($response)){
+x            return ApiResponseService::incorrectParams();
+        }
+
+        return $response;
+    }
+
+    /**
+     * Unique route [method="POST"]
+     *
+     * @param Request $request
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function post(Request $request){
+        if($request->has('id')){
+            $response = $this->edit($request->input('id'), $request->input('data'), $request->file('files'), $request->input('removeFiles'));
+        }else{
+            $response = $this->create($request->input('data'), $request->file('files'));
+        }
+        return $response;
+    }
+
+    /**
+     * Unique route [method="DELETE"]
+     *
+     * @param Request $request
+     * @param $id
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function delete(Request $request, $model, $id = null){
+
+        if($request->has('ids')){
+            $response = $this->_deleteMany($request->get('ids'));
+        }elseif(! $id){
+            $response = ApiResponseService::incorrectParams();
+        }else{
+            $response = $this->_delete($id);
+        }
+
+        return $response;
+    }
+}
