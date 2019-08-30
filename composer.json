@@ -1,6 +1,6 @@
 {
-    "name": "robmkr/smartadmin",
-    "description": "Smart Admin is an library for Laravel REST Applications (Developed By RobMKR (C) 2017)",
+    "name": "mgplab/smartadmin",
+    "description": "Smart Admin is an library for Laravel REST Applications (Developed By RobMKR (MgpLabs) (C) 2017)",
     "license": "MIT",
     "authors": [
         {
@@ -25,7 +25,7 @@
     },
     "autoload": {
         "psr-4": {
-            "RobMkr\\SmartAdmin\\" : "/src"
+            "MgpLabs\\SmartAdmin\\" : "/src"
         }
     }
 }
